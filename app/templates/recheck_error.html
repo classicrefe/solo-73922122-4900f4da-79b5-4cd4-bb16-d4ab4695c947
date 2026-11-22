@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>复查未完成 · 铁路桩号换版核查</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="wrap">
+      <div class="brand">
+        <span class="badge">工务</span>
+        <h1>复查未完成</h1>
+      </div>
+      <a class="back" href="/">重新上传</a>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section class="card error-card" role="alert">
+      <h2>无法复查</h2>
+      <pre class="error-text">{{ error }}</pre>
+      <p class="muted">
+        两版桩号表仍在本次会话中（旧版：{{ old_name }} · 新版：{{ new_name }}），
+        可直接修改范围后再次提交，无需重新上传。
+      </p>
+    </section>
+
+    <section class="card recheck-card">
+      <h2>修改范围后重试</h2>
+      <form method="post" action="/recheck/{{ session_id }}" class="recheck-form">
+        <div class="field inline">
+          <label for="query_start">旧号起（整数米）</label>
+          <input id="query_start" name="query_start" type="text" inputmode="numeric"
+                 pattern="[+-]?[0-9]+" value="{{ form_values.query_start }}" required>
+        </div>
+        <div class="field inline">
+          <label for="query_end">旧号止（整数米，含）</label>
+          <input id="query_end" name="query_end" type="text" inputmode="numeric"
+                 pattern="[+-]?[0-9]+" value="{{ form_values.query_end }}" required>
+        </div>
+        <button type="submit">再次提交</button>
+      </form>
+      <p class="hint">本次会话剩余有效期约 {{ session_expires_minutes }} 分钟。</p>
+    </section>
+  </main>
+
+  <footer class="wrap foot">铁路桩号换版核查 · 仅处理整数米桩号</footer>
+</body>
+</html>

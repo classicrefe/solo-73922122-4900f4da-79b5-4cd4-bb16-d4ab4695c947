@@ -36,7 +36,7 @@ import bisect
 import csv
 import io
 import re
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from itertools import pairwise
 
@@ -573,11 +573,67 @@ def _chainage_overlap_ranges(segments: tuple[Segment, ...]) -> RangeSet:
     return RangeSet(ranges)
 
 
-def _intersect_ranges(
-    ranges: RangeSet, low: int, high: int
-) -> list[tuple[int, int]]:
-    """求半开区间集合与 [low, high) 的交集。"""
-    return ranges.intersect(low, high)
+@dataclass(frozen=True)
+class BoundaryIndex:
+    """全线判重索引 + 按旧段准备切分边界。
+
+    两份“全线”数据只依赖两版表，首次核查时构建一次即可反复复用：
+
+    * 旧表里程重叠区间：同一工程里程是否对应多个旧号；
+    * 新表桩号重叠区间：换算出的新号是否被多个新段占用。
+
+    ``boundaries_for`` 只处理一个旧段，输出该段在旧号空间中可能改变分类的
+    全部边界。调用方可以按旧段缓存结果：首次命中某段时计算，换查该段另一截
+    时直接复用，无需重算全线。
+    """
+
+    old_table: SegmentTable
+    new_table: SegmentTable
+    old_mileage_overlaps: RangeSet = field(repr=False)
+    new_chainage_overlaps: RangeSet = field(repr=False)
+
+    @classmethod
+    def build(cls, old_table: SegmentTable, new_table: SegmentTable) -> BoundaryIndex:
+        # 旧表里程重叠区间（半开）。用 start_chainage 当作里程坐标。
+        old_mileage_overlaps = _chainage_overlap_ranges(
+            tuple(
+                Segment(s.segment_no, s.start_mileage_m, s.end_mileage_m, s.start_mileage_m)
+                for s in old_table.segments
+            )
+        )
+        return cls(
+            old_table=old_table,
+            new_table=new_table,
+            old_mileage_overlaps=old_mileage_overlaps,
+            new_chainage_overlaps=_chainage_overlap_ranges(new_table.segments),
+        )
+
+    def boundaries_for(self, old_seg: Segment) -> tuple[int, ...]:
+        """返回单个旧段相关的切分边界（旧号坐标，已排序去重）。"""
+        boundaries: set[int] = {old_seg.start_chainage, old_seg.chainage_end}
+        o_m_lo, o_m_hi = old_seg.start_mileage_m, old_seg.end_mileage_m
+
+        # 旧表同一里程被多个段覆盖 → 边界取交叠端点
+        for m_lo, m_hi in self.old_mileage_overlaps.intersect(o_m_lo, o_m_hi):
+            boundaries.add(old_seg.chainage_at(m_lo))
+            boundaries.add(old_seg.chainage_at(m_hi))
+
+        # 与旧段里程相交的新段
+        for new_seg in self.new_table.mileage_index.overlapping(o_m_lo, o_m_hi):
+            m_lo = max(o_m_lo, new_seg.start_mileage_m)
+            m_hi = min(o_m_hi, new_seg.end_mileage_m)
+            boundaries.add(old_seg.chainage_at(m_lo))
+            boundaries.add(old_seg.chainage_at(m_hi))
+
+            # 该新段的桩号范围（仅限本交叠区可达的部分）
+            chain_low = new_seg.chainage_at(m_lo)
+            chain_high = new_seg.chainage_at(m_hi)
+            offset = chain_low - old_seg.chainage_at(m_lo)
+            for c_lo, c_hi in self.new_chainage_overlaps.intersect(chain_low, chain_high):
+                boundaries.add(c_lo - offset)
+                boundaries.add(c_hi - offset)
+
+        return tuple(sorted(boundaries))
 
 
 def _collect_boundaries(
@@ -585,6 +641,7 @@ def _collect_boundaries(
     new_table: SegmentTable,
     q_start: int,
     q_end: int,
+    boundary_provider: Callable[[Segment], Iterable[int]] | None = None,
 ) -> list[int]:
     """收集旧号空间中分类可能变化的边界。返回已排序的唯一整数边界。
 
@@ -595,64 +652,20 @@ def _collect_boundaries(
     * 新旧段里程交叠区内，新段桩号与其他新段桩号重叠的区间端点：
       映射到旧号后即新号唯一性变化的位置。
 
+    只有与查询区间相交的旧段会贡献落在区间内的边界。``boundary_provider``
+    可按旧段提供预先算好/缓存的边界；未提供时现场构建 ``BoundaryIndex``。
     复杂度与段数相关（近似 O(n log n) 加实际交叠对数），与区间长度无关。
     """
     q_stop = q_end + 1
+    if boundary_provider is None:
+        boundary_provider = BoundaryIndex.build(old_table, new_table).boundaries_for
+
     boundaries: set[int] = {q_start, q_stop}
-
-    def add(value: int) -> None:
-        if q_start < value < q_stop:
-            boundaries.add(value)
-
-    old_segs = old_table.segments
-    new_segs = new_table.segments
-
-    # 旧段桩号端点
-    for old_seg in old_segs:
-        add(old_seg.start_chainage)
-        add(old_seg.chainage_end)
-
-    # 新表桩号重叠区间，预先算好
-    new_chain_overlaps = _chainage_overlap_ranges(new_segs)
-
-    # 旧表里程重叠区间，预先算好（半开）。用 start_chainage 当作里程坐标。
-    old_mileage_overlaps = _chainage_overlap_ranges(
-        tuple(
-            Segment(s.segment_no, s.start_mileage_m, s.end_mileage_m, s.start_mileage_m)
-            for s in old_segs
-        )
-    )
-
-    old_query = [
-        seg for seg in old_segs if seg.start_chainage < q_stop and seg.chainage_end > q_start
-    ]
-
-    # 用 IntervalIndex 查询，避免整表两两扫描
-    new_mileage_index = new_table.mileage_index
-
-    for old_seg in old_query:
-        o_m_lo, o_m_hi = old_seg.start_mileage_m, old_seg.end_mileage_m
-
-        # 旧表同一里程被多个段覆盖 → 边界取交叠端点
-        for m_lo, m_hi in _intersect_ranges(old_mileage_overlaps, o_m_lo, o_m_hi):
-            add(old_seg.chainage_at(m_lo))
-            add(old_seg.chainage_at(m_hi))
-
-        # 与旧段里程相交的新段
-        overlapping_new = new_mileage_index.overlapping(o_m_lo, o_m_hi)
-        for new_seg in overlapping_new:
-            m_lo = max(o_m_lo, new_seg.start_mileage_m)
-            m_hi = min(o_m_hi, new_seg.end_mileage_m)
-            add(old_seg.chainage_at(m_lo))
-            add(old_seg.chainage_at(m_hi))
-
-            # 该新段的桩号范围（仅限本交叠区可达的部分）
-            chain_low = new_seg.chainage_at(m_lo)
-            chain_high = new_seg.chainage_at(m_hi)
-            offset = chain_low - old_seg.chainage_at(m_lo)
-            for c_lo, c_hi in _intersect_ranges(new_chain_overlaps, chain_low, chain_high):
-                add(c_lo - offset)
-                add(c_hi - offset)
+    # 用桩号区间索引定位受查询影响的旧段，避免每次扫描全表。
+    for old_seg in old_table.chainage_index.overlapping(q_start, q_stop):
+        for value in boundary_provider(old_seg):
+            if q_start < value < q_stop:
+                boundaries.add(value)
 
     return sorted(boundaries)
 
@@ -796,11 +809,24 @@ def analyse_migration(
     new_table: SegmentTable,
     query_start: int,
     query_end: int,
+    boundary_provider: Callable[[Segment], Iterable[int]] | None = None,
+    boundary_index: BoundaryIndex | None = None,
 ) -> AnalysisResult:
+    """核查 [query_start, query_end] 内的旧号。
+
+    ``boundary_provider`` / ``boundary_index`` 供复查会话复用已准备好的
+    切分边界；二者都不传时行为与单次核查完全一致（现场构建全线索引）。
+    """
     if query_start > query_end:
         raise InputError("旧号起不能大于旧号止。")
 
-    boundaries = _collect_boundaries(old_table, new_table, query_start, query_end)
+    if boundary_provider is None:
+        index = boundary_index or BoundaryIndex.build(old_table, new_table)
+        boundary_provider = index.boundaries_for
+
+    boundaries = _collect_boundaries(
+        old_table, new_table, query_start, query_end, boundary_provider
+    )
     rows: list[MigrationRow] = []
     # 每个 [boundaries[i], boundaries[i+1]) 半开子区间内分类恒定
     for left, right in pairwise(boundaries):

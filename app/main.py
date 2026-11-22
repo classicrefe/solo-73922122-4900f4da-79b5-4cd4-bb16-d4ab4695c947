@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import time
 from pathlib import Path
 from urllib.parse import quote
 
@@ -24,9 +25,9 @@ from .analysis import (
     analyse_migration,
     parse_table_bytes,
     result_to_csv,
-    table_warnings,
     validate_table,
 )
+from .session import AnalysisSession, SegmentPreparationError
 from .store import ResultStore
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -105,6 +106,61 @@ async def index(request: Request):
     )
 
 
+def _stamp_filename(old_name: str, new_name: str, start: int, end: int) -> str:
+    stamp = f"{old_name.rsplit('.', 1)[0]}_to_{new_name.rsplit('.', 1)[0]}"
+    stamp = re.sub(r"[^\w一-鿿.-]+", "_", stamp)[:80] or "migration"
+    return f"{stamp}_{start}-{end}.csv"
+
+
+def _expires_minutes(created_at: float) -> int:
+    remaining = store.ttl_seconds - (time.time() - created_at)
+    return max(1, int(remaining // 60))
+
+
+def _render_result(
+    request: Request,
+    *,
+    session_id: str,
+    session: AnalysisSession,
+    old_name: str,
+    new_name: str,
+    session_created_at: float,
+    start: int,
+    end: int,
+    result,
+    download_token: str,
+    download_name: str,
+    form_values: dict[str, str] | None = None,
+) -> HTMLResponse:
+    return templates.TemplateResponse(
+        request,
+        "result.html",
+        {
+            "version": __version__,
+            "status_labels": STATUS_LABELS,
+            "result": result,
+            "rows": [r.as_dict() for r in result.rows],
+            "summary": result.summary_rows(),
+            "warnings": session.warnings,
+            "old_name": old_name,
+            "new_name": new_name,
+            "old_segment_count": len(session.old_table),
+            "new_segment_count": len(session.new_table),
+            "session_id": session_id,
+            "session_expires_minutes": _expires_minutes(session_created_at),
+            "download_token": download_token,
+            "download_name": download_name,
+            "migratable_interval_count": len(result.migratable_rows),
+            "migratable_total": sum(r.count for r in result.migratable_rows),
+            "total_queried": result.total_queried,
+            "form_values": form_values or {
+                "query_start": str(start),
+                "query_end": str(end),
+            },
+        },
+    )
+
+
 @app.post("/analyse", response_class=HTMLResponse)
 async def analyse(
     request: Request,
@@ -130,11 +186,19 @@ async def analyse(
                 errors = validate_table(table)
                 if errors:
                     raise InputError("数据校验未通过：\n" + "\n".join(errors))
-            return old_table, new_table, analyse_migration(old_table, new_table, start, end)
+            # 会话保存两版表与全线判重索引，供结果页换范围复查复用。
+            session = AnalysisSession(old_table, new_table)
+            return session, analyse_migration(
+                old_table,
+                new_table,
+                start,
+                end,
+                boundary_provider=session.boundaries_for,
+            )
 
         # 解析与核查是 CPU 密集型，放到线程池，避免阻塞事件循环。
-        old_table, new_table, result = await run_in_threadpool(run_analysis)
-    except InputError as exc:
+        session, result = await run_in_threadpool(run_analysis)
+    except (InputError, SegmentPreparationError) as exc:
         return templates.TemplateResponse(
             request,
             "index.html",
@@ -150,9 +214,8 @@ async def analyse(
         )
 
     csv_text = result_to_csv(result)
-    stamp = f"{old_name.rsplit('.', 1)[0]}_to_{new_name.rsplit('.', 1)[0]}"
-    stamp = re.sub(r"[^\w一-鿿.-]+", "_", stamp)[:80] or "migration"
-    download_name = f"{stamp}_{start}-{end}.csv"
+    download_name = _stamp_filename(old_name, new_name, start, end)
+    stored_session = store.create_session(session, old_name, new_name)
     stored = store.put(
         csv_text=csv_text,
         filename=download_name,
@@ -161,29 +224,107 @@ async def analyse(
             "query_end": end,
             "migratable_rows": len(result.migratable_rows),
         },
+        session_id=stored_session.session_id,
+    )
+    assert stored is not None  # 刚创建的会话必然存在
+
+    return _render_result(
+        request,
+        session_id=stored_session.session_id,
+        session=session,
+        old_name=old_name,
+        new_name=new_name,
+        session_created_at=stored_session.created_at,
+        start=start,
+        end=end,
+        result=result,
+        download_token=stored.token,
+        download_name=download_name,
     )
 
-    warnings = table_warnings(old_table) + table_warnings(new_table)
-    return templates.TemplateResponse(
-        request,
-        "result.html",
-        {
-            "version": __version__,
-            "status_labels": STATUS_LABELS,
-            "result": result,
-            "rows": [r.as_dict() for r in result.rows],
-            "summary": result.summary_rows(),
-            "warnings": warnings,
-            "old_name": old_name,
-            "new_name": new_name,
-            "old_segment_count": len(old_table),
-            "new_segment_count": len(new_table),
-            "download_token": stored.token,
-            "download_name": stored.filename,
-            "migratable_interval_count": len(result.migratable_rows),
-            "migratable_total": sum(r.count for r in result.migratable_rows),
-            "total_queried": result.total_queried,
+
+@app.post("/recheck/{session_id}", response_class=HTMLResponse)
+async def recheck(
+    request: Request,
+    session_id: str,
+    query_start: str = Form(...),
+    query_end: str = Form(...),
+):
+    """在已有会话上换旧号范围复查，复用两版表与全线判重索引。"""
+    stored_session = store.get_session(session_id)
+    if stored_session is None:
+        return templates.TemplateResponse(
+            request,
+            "expired.html",
+            {"version": __version__},
+            status_code=404,
+        )
+
+    session = stored_session.session
+    form_values = {"query_start": query_start, "query_end": query_end}
+    try:
+        start = _parse_query_number(query_start, "旧号起")
+        end = _parse_query_number(query_end, "旧号止")
+        result = await run_in_threadpool(
+            analyse_migration,
+            session.old_table,
+            session.new_table,
+            start,
+            end,
+            session.boundaries_for,
+        )
+    except (InputError, SegmentPreparationError) as exc:
+        # 失败时保留表单与原因，用户可以直接改范围再次提交。
+        return templates.TemplateResponse(
+            request,
+            "recheck_error.html",
+            {
+                "version": __version__,
+                "error": str(exc),
+                "session_id": session_id,
+                "form_values": form_values,
+                "old_name": stored_session.old_name,
+                "new_name": stored_session.new_name,
+                "session_expires_minutes": _expires_minutes(stored_session.created_at),
+            },
+            status_code=400,
+        )
+
+    csv_text = result_to_csv(result)
+    download_name = _stamp_filename(
+        stored_session.old_name, stored_session.new_name, start, end
+    )
+    stored = store.put(
+        csv_text=csv_text,
+        filename=download_name,
+        summary={
+            "query_start": start,
+            "query_end": end,
+            "migratable_rows": len(result.migratable_rows),
         },
+        session_id=session_id,
+    )
+    if stored is None:  # 会话恰在核查期间失效
+        return templates.TemplateResponse(
+            request,
+            "expired.html",
+            {"version": __version__},
+            status_code=404,
+        )
+
+    return _render_result(
+        request,
+        session_id=session_id,
+        session=session,
+        old_name=stored_session.old_name,
+        new_name=stored_session.new_name,
+        session_created_at=stored_session.created_at,
+        start=start,
+        end=end,
+        result=result,
+        download_token=stored.token,
+        download_name=download_name,
+        form_values=form_values,
     )
 
 

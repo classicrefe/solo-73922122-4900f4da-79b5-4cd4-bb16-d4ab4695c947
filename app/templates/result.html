@@ -19,6 +19,35 @@
   </header>
 
   <main class="wrap">
+    <section class="card recheck-card">
+      <div class="result-head">
+        <div>
+          <h2>换旧号范围复查</h2>
+          <p class="muted">
+            复用本页已上传的两版桩号表与全线判重索引，无需重新上传；
+            结果与单独上传同一份表、同一范围完全一致。
+          </p>
+        </div>
+      </div>
+      <form method="post" action="/recheck/{{ session_id }}" class="recheck-form">
+        <div class="field inline">
+          <label for="query_start">旧号起（整数米）</label>
+          <input id="query_start" name="query_start" type="text" inputmode="numeric"
+                 pattern="[+-]?[0-9]+" value="{{ form_values.query_start }}" required>
+        </div>
+        <div class="field inline">
+          <label for="query_end">旧号止（整数米，含）</label>
+          <input id="query_end" name="query_end" type="text" inputmode="numeric"
+                 pattern="[+-]?[0-9]+" value="{{ form_values.query_end }}" required>
+        </div>
+        <button type="submit">按新范围复查</button>
+      </form>
+      <p class="hint">
+        本次会话保留 {{ session_expires_minutes }} 分钟；过期后复查入口和全部下载
+        链接都会失效，届时请返回首页重新上传。
+      </p>
+    </section>
+
     <section class="card">
       <div class="result-head">
         <div>

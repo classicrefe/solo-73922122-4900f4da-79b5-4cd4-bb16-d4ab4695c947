@@ -170,6 +170,20 @@ table.mini th { background: #f0f3f6; }
 
 .foot { color: var(--muted); font-size: 12px; padding-bottom: 28px; }
 
+.recheck-card { border-color: #bcd8cd; background: #fbfefc; }
+.recheck-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 14px;
+  margin-top: 6px;
+}
+.recheck-form .field.inline { margin: 0; min-width: 200px; flex: 1 1 200px; }
+.recheck-form .field.inline label { font-weight: 500; font-size: 13px; color: var(--muted); }
+.recheck-form button { flex: 0 0 auto; }
+.recheck-card .hint { margin-top: 10px; }
+
+
 @media (max-width: 720px) {
   .grid2, .stats { grid-template-columns: 1fr; }
   .card { padding: 16px; }
