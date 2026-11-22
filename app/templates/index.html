@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>铁路桩号换版核查</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="wrap">
+      <div class="brand">
+        <span class="badge">工务</span>
+        <h1>铁路桩号换版核查</h1>
+      </div>
+      <span class="version">v{{ version }}</span>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section class="card intro">
+      <h2>用途</h2>
+      <p>
+        台账只存桩号。换版时先查清哪些旧号能自动迁移，哪些要先补段号。
+        上传同一条线路的两个版本桩号表，并给出需要核查的旧号范围，系统按区间给出结论：
+      </p>
+      <ul>
+        <li><strong>可迁移</strong>：旧号在全线唯一、该工程位置有新号、且新号在全线唯一；给出对应新号区间。</li>
+        <li><strong>缺号</strong>：旧表没有任何段覆盖该桩号，须先补段号/补录。</li>
+        <li><strong>重号（旧表）</strong>：旧表桩号区间重叠，或同一工程里程对应多个旧号。</li>
+        <li><strong>重号（新表）</strong>：该工程位置在新表被多个段覆盖，或换算出的新号在新表重复。</li>
+        <li><strong>新表未覆盖</strong>：新表没有覆盖该工程里程，须先在新表补段。</li>
+      </ul>
+      <p class="muted">
+        每段含段号、左闭右开的工程里程范围和起点桩号，单位为整数米，段内每米加一。
+        长区间按段与边界切分处理，不会逐米展开。
+      </p>
+    </section>
+
+    {% if error %}
+    <section class="card error-card" role="alert">
+      <h2>无法核查</h2>
+      <pre class="error-text">{{ error }}</pre>
+    </section>
+    {% endif %}
+
+    <form class="card" method="post" action="/analyse" enctype="multipart/form-data">
+      <h2>上传与范围</h2>
+
+      <div class="grid2">
+        <div class="field">
+          <label for="old_file">旧版桩号表 <span class="req">必填</span></label>
+          <input id="old_file" name="old_file" type="file" accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" required>
+          {% if old_filename %}<p class="hint">上次选择：{{ old_filename }}</p>{% endif %}
+          <p class="hint">CSV（UTF-8 / GB18030）或 XLSX，≤ 20 MB。</p>
+        </div>
+        <div class="field">
+          <label for="new_file">新版桩号表 <span class="req">必填</span></label>
+          <input id="new_file" name="new_file" type="file" accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" required>
+          {% if new_filename %}<p class="hint">上次选择：{{ new_filename }}</p>{% endif %}
+          <p class="hint">CSV（UTF-8 / GB18030）或 XLSX，≤ 20 MB。</p>
+        </div>
+      </div>
+
+      <div class="grid2">
+        <div class="field">
+          <label for="query_start">要核查的旧号起（整数米） <span class="req">必填</span></label>
+          <input id="query_start" name="query_start" type="text" inputmode="numeric" pattern="[+-]?[0-9]+" placeholder="例如 1000" value="{{ form_values.query_start if form_values else '' }}" required>
+        </div>
+        <div class="field">
+          <label for="query_end">要核查的旧号止（整数米，含） <span class="req">必填</span></label>
+          <input id="query_end" name="query_end" type="text" inputmode="numeric" pattern="[+-]?[0-9]+" placeholder="例如 9000" value="{{ form_values.query_end if form_values else '' }}" required>
+        </div>
+      </div>
+
+      <details class="format">
+        <summary>桩号表格式说明</summary>
+        <p>每行一段，四列（表头可用中文或英文）：</p>
+        <table class="mini">
+          <thead><tr><th>段号</th><th>里程起点</th><th>里程终点</th><th>起点桩号</th></tr></thead>
+          <tbody>
+            <tr><td>K1</td><td>0</td><td>500</td><td>1000</td></tr>
+            <tr><td>K2</td><td>500</td><td>1200</td><td>1500</td></tr>
+          </tbody>
+        </table>
+        <p class="muted">
+          上例 K1 覆盖工程里程 [0, 500)，桩号为 1000–1499；K2 覆盖 [500, 1200)，桩号为 1500–2199。
+          里程区间左闭右开，段内每米桩号加一。分段之间的里程可以不连续，但桩号不可重复。
+        </p>
+        <p>下载示例：<a href="/samples/old_v1.csv">旧版示例.csv</a> · <a href="/samples/new_v1.csv">新版示例.csv</a></p>
+      </details>
+
+      <div class="actions">
+        <button type="submit">开始核查</button>
+      </div>
+    </form>
+  </main>
+
+  <footer class="wrap foot">铁路桩号换版核查 · 仅处理整数米桩号</footer>
+</body>
+</html>

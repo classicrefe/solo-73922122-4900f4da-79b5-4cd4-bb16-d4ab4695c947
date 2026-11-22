@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>核查结果 · 铁路桩号换版核查</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="wrap">
+      <div class="brand">
+        <span class="badge">工务</span>
+        <h1>核查结果</h1>
+      </div>
+      <a class="back" href="/">重新核查</a>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section class="card">
+      <div class="result-head">
+        <div>
+          <h2>旧号 {{ result.query_start }} – {{ result.query_end }}</h2>
+          <p class="muted">
+            旧版：{{ old_name }}（{{ old_segment_count }} 段） ·
+            新版：{{ new_name }}（{{ new_segment_count }} 段）
+          </p>
+        </div>
+        <a class="button download" href="/download/{{ download_token }}" download="{{ download_name }}">
+          下载可迁移区间 CSV
+        </a>
+      </div>
+
+      <div class="stats">
+        <div class="stat good">
+          <span class="num">{{ migratable_total }}</span>
+          <span class="lbl">可迁移旧号</span>
+          <span class="sub">{{ migratable_interval_count }} 个区间</span>
+        </div>
+        <div class="stat">
+          <span class="num">{{ total_queried }}</span>
+          <span class="lbl">核查旧号总数</span>
+          <span class="sub">含首尾</span>
+        </div>
+        <div class="stat warn">
+          <span class="num">{{ total_queried - migratable_total }}</span>
+          <span class="lbl">需人工处理</span>
+          <span class="sub">见下方分类</span>
+        </div>
+      </div>
+
+      <div class="summary">
+        {% for item in summary %}
+        <span class="pill status-{{ item.status }}">
+          {{ item.label }}：{{ item.count }} 个旧号 / {{ item['intervals'] }} 个区间
+        </span>
+        {% endfor %}
+      </div>
+
+      {% if warnings %}
+      <details class="warnings">
+        <summary>数据提示（{{ warnings|length }} 条，不影响分类）</summary>
+        <ul>
+          {% for w in warnings %}<li>{{ w }}</li>{% endfor %}
+        </ul>
+      </details>
+      {% endif %}
+    </section>
+
+    <section class="card">
+      <h2>按区间明细</h2>
+      <p class="muted">
+        “相关段号”一列：可迁移区间为“旧段号 → 新段号”，异常区间为涉及的段号。
+        CSV 只导出可迁移区间。
+      </p>
+      <div class="table-scroll">
+        <table class="result-table">
+          <thead>
+            <tr>
+              <th>状态</th>
+              <th class="num-col">旧号起</th>
+              <th class="num-col">旧号止</th>
+              <th class="num-col">个数</th>
+              <th class="num-col">新号起</th>
+              <th class="num-col">新号止</th>
+              <th>相关段号</th>
+              <th>说明</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in rows %}
+            <tr class="status-{{ row.status }}">
+              <td><span class="tag status-{{ row.status }}">{{ row.status_label }}</span></td>
+              <td class="num-col">{{ row.range_start_old }}</td>
+              <td class="num-col">{{ row.range_end_old }}</td>
+              <td class="num-col">{{ row.count }}</td>
+              <td class="num-col">{{ row.new_start if row.new_start is not none else '—' }}</td>
+              <td class="num-col">{{ row.new_end if row.new_end is not none else '—' }}</td>
+              <td>{{ row.segment_nos or '—' }}</td>
+              <td class="detail">{{ row.detail }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <footer class="wrap foot">铁路桩号换版核查 · 仅处理整数米桩号</footer>
+</body>
+</html>
